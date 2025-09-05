@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "flightbookings": {
+      "command": "python",
+      "args": ["/absolute/path/to/your/src/flightbookings_server.py"],
+      "env": {},
+      "cwd": "/absolute/path/to/your/flightbookings-mcp"
+    }
+  }
+}
