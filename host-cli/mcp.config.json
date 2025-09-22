@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "filesystem": {
+      "command": "mcp-filesystem",
+      "args": ["--root", "."]
+    },
+    "git": {
+      "command": "mcp-git",
+      "args": []
+    }
+  }
+}
