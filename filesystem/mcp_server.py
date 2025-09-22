@@ -7,6 +7,7 @@ from fastmcp import FastMCP
 import sys 
 # Create the MCP server
 mcp = FastMCP("filesystem-git-server")
+import logging
 
 # =============================================================================
 # FILESYSTEM TOOLS
@@ -226,9 +227,10 @@ Alternatively, you can use Git GUI or your IDE's git integration.
 # =============================================================================
 
 if __name__ == "__main__":
-    # Run the server
-    print("Starting improved MCP server with better git handling...")
+    # Loguea a stderr (no uses print a stdout)
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    logging.info("Starting filesystem-git MCP server…")
     try:
         mcp.run()
     except Exception as e:
-        print(f"Error starting server: {e}")
+        logging.exception("Failed to start server: %s", e)
