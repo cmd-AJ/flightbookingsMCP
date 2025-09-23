@@ -3,67 +3,147 @@ import sys
 import json
 import asyncio
 from dotenv import load_dotenv
-from google import genai
+import google.generativeai as genai
 from fastmcp import Client as FastMCPClient
 
+# =========================
+# CONFIG
+# =========================
 load_dotenv()
 logs = []
-
-# Inicializa Gemini
-try:
-    gclient = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-    chat = gclient.chats.create(model="gemini-2.0-flash")
-except Exception as e:
-    print("Error inicializando Gemini:", e)
-    sys.exit(1)
 
 LOCAL_URL = os.getenv("LOCAL_URL", "http://localhost:8080/mcp")
 REMOTE_URL = os.getenv("REMOTE_URL", "https://flightbookingU.fastmcp.app/mcp")
 
+async def get_mcp_tools(url: str):
+    """List available MCP tools from server."""
+    client = FastMCPClient(url)
+    async with client:
+        return await client.list_tools()
+
 async def call_mcp_tool(tool: str, params: dict, url: str):
+    """Call an MCP server tool (local or remote)."""
     client = FastMCPClient(url)
     async with client:
         return await client.call_tool(tool, params)
 
-print("=== Chat CLI con Gemini + MCP ===")
-print("Comandos:")
-print('  :mcp <tool> {"k":"v"}          → llama al servidor local')
-print('  :mcp-remote <tool> {"k":"v"}   → llama al servidor remoto\n')
+# =========================
+# Load MCP tools dynamically
+# =========================
+print("Fetching tool lists from MCP servers...")
+local_tools = asyncio.run(get_mcp_tools(LOCAL_URL))
+remote_tools = asyncio.run(get_mcp_tools(REMOTE_URL))
+
+# Gemini tool schemas with tool names from MCP
+
+tools = [
+    genai.protos.FunctionDeclaration(
+        name="call_mcp_local",
+        description="Call a tool on the LOCAL MCP server (filesystem/git).",
+        parameters=genai.protos.Schema(
+            type=genai.protos.Type.OBJECT,
+            properties={
+                "tool_name": genai.protos.Schema(
+                    type=genai.protos.Type.STRING,
+                    enum=[t.name for t in local_tools],
+                    description="The tool name to call on the local server."
+                ),
+                "params": genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    description="Parameters for the tool call"
+                )
+            },
+            required=["tool_name"]
+        )
+    ),
+        genai.protos.FunctionDeclaration(
+        name="call_mcp_remote",
+        description="Call a tool on the REMOTE MCP server (flight booking).",
+        parameters=genai.protos.Schema(
+            type=genai.protos.Type.OBJECT,
+            properties={
+                "tool_name": genai.protos.Schema(
+                    type=genai.protos.Type.STRING,
+                    enum=[t.name for t in remote_tools],
+                    description="The tool name to call."
+                ),
+                "params": genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    description="Parameters for the tool call. "
+                                "For example, 'search_cheapest_flights' only accepts {limit, max_stops}."
+                )
+            },
+            required=["tool_name"]
+        )
+    )
+]
+
+print("Local tools:", [t.name for t in local_tools])
+print("Remote tools:", [t.name for t in remote_tools])
+
+# =========================
+# Init Gemini
+# =========================
+try:
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    model = genai.GenerativeModel("gemini-1.5-flash", tools=tools)
+    chat = model.start_chat()
+except Exception as e:
+    print(f"Error initializing Gemini: {e}")
+    sys.exit(1)
+
+# =========================
+# CLI Loop
+# =========================
+print("=== Chat CLI with Gemini + MCP Function Calling ===")
+print("Type 'exit' to quit.\n")
 
 while True:
     user_input = input("> ")
     if not user_input or user_input.lower() == "exit":
         break
 
-    # --- LOCAL ---
-    if user_input.startswith(":mcp "):
-        try:
-            parts = user_input.split(maxsplit=2)
-            tool = parts[1]
-            params = json.loads(parts[2]) if len(parts) > 2 else {}
-            result = asyncio.run(call_mcp_tool(tool, params, LOCAL_URL))
-            print("\n[MCP Local result]\n", result, "\n")
-        except Exception as e:
-            print("Error MCP local:", e)
-        continue
-
-    # --- REMOTO ---
-    if user_input.startswith(":mcp-remote "):
-        try:
-            parts = user_input.split(maxsplit=2)
-            tool = parts[1]
-            params = json.loads(parts[2]) if len(parts) > 2 else {}
-            result = asyncio.run(call_mcp_tool(tool, params, REMOTE_URL))
-            print("\n[MCP Remote result]\n", result, "\n")
-        except Exception as e:
-            print("Error MCP remoto:", e)
-        continue
-
-    # --- Normal Gemini ---
     try:
         resp = chat.send_message(user_input)
-        print("\nGemini:", resp.text, "\n")
-    except Exception as e:
-        print("Error con Gemini:", e)
 
-print("=== Sesión terminada ===")
+        handled = False
+        for part in resp.candidates[0].content.parts:
+            if part.function_call:
+                fn = part.function_call
+                tool_name_from_gemini = fn.args.get("tool_name")
+                params_from_gemini = fn.args.get("params", {})
+
+                print(f"[Gemini → {fn.name}] tool={tool_name_from_gemini} params={params_from_gemini}")
+
+                if fn.name == "call_mcp_local":
+                    url = LOCAL_URL
+                elif fn.name == "call_mcp_remote":
+                    url = REMOTE_URL
+                else:
+                    print(f"Unknown function: {fn.name}")
+                    continue
+
+                # Call MCP tool
+                tool_result = asyncio.run(call_mcp_tool(tool_name_from_gemini, params_from_gemini, url))
+
+                if not isinstance(tool_result, dict):
+                    tool_result = {"response": str(tool_result)}
+
+                # Send back result
+                followup = chat.send_message({
+                    "function_response": {
+                        "name": fn.name,
+                        "response": tool_result
+                    }
+                })
+                print("\nGemini (after tool):", followup.text, "\n")
+                handled = True
+                break
+
+        if not handled:
+            print("\nGemini:", resp.text, "\n")
+
+    except Exception as e:
+        print(f"Error with Gemini: {e}")
+
+print("=== Session ended ===")
