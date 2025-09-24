@@ -5,6 +5,9 @@ import asyncio
 from dotenv import load_dotenv
 import google.generativeai as genai
 from fastmcp import Client as FastMCPClient
+from colorama import Fore, Back, Style, init
+
+init(autoreset=True)
 
 # =========================
 # CONFIG
@@ -14,6 +17,22 @@ logs = []
 
 LOCAL_URL = os.getenv("LOCAL_URL", "http://localhost:8080/mcp")
 REMOTE_URL = os.getenv("REMOTE_URL", "https://flightbookingU.fastmcp.app/mcp")
+
+
+def print_heading(heading: str):
+    print(Fore.CYAN + Style.BRIGHT + f"=== {heading} ===")
+
+def print_error(message: str):
+    print(Fore.RED + f"[ERROR] {message}")
+
+def print_info(message: str):
+    print(Fore.GREEN + f"[INFO] {message}")
+
+def print_function_call(tool_name, params):
+    print(Fore.YELLOW + f"[Gemini → {tool_name}] Params: {params}")
+
+def print_tool_result(result):
+    print(Fore.MAGENTA + f"[TOOL RESULT] {result}")
 
 async def get_mcp_tools(url: str):
     """List available MCP tools from server."""
@@ -95,12 +114,13 @@ except Exception as e:
 # =========================
 # CLI Loop
 # =========================
-print("=== Chat CLI with Gemini + MCP Function Calling ===")
-print("Type 'exit' to quit.\n")
+print_heading("Chat CLI with Gemini + MCP Function Calling")
+print_info("Type 'exit' to quit.\n")
 
 while True:
-    user_input = input("> ")
+    user_input = input(Fore.WHITE + "You: ")
     if not user_input or user_input.lower() == "exit":
+        print_info("Session ended")
         break
 
     try:
@@ -113,14 +133,15 @@ while True:
                 tool_name_from_gemini = fn.args.get("tool_name")
                 params_from_gemini = fn.args.get("params", {})
 
-                print(f"[Gemini → {fn.name}] tool={tool_name_from_gemini} params={params_from_gemini}")
+                print_function_call(tool_name_from_gemini, params_from_gemini)
 
+                # Determine whether to call local or remote MCP
                 if fn.name == "call_mcp_local":
                     url = LOCAL_URL
                 elif fn.name == "call_mcp_remote":
                     url = REMOTE_URL
                 else:
-                    print(f"Unknown function: {fn.name}")
+                    print_error(f"Unknown function: {fn.name}")
                     continue
 
                 # Call MCP tool
@@ -136,14 +157,12 @@ while True:
                         "response": tool_result
                     }
                 })
-                print("\nGemini (after tool):", followup.text, "\n")
+                print_tool_result(followup.text)
                 handled = True
                 break
 
         if not handled:
-            print("\nGemini:", resp.text, "\n")
+            print(Fore.BLUE + f"Gemini: {resp.text}\n")
 
     except Exception as e:
-        print(f"Error with Gemini: {e}")
-
-print("=== Session ended ===")
+        print_error(f"Error with Gemini: {e}")
