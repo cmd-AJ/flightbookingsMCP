@@ -204,3 +204,13 @@ GOOGLE_API_KEY="codigo"
 # External APIs
 flightbookin-API=https://flightbookingU.fastmcp.app/mcp
 
+
+
+Connection with claude
+
+"mcpServers": {
+    "filesystem-git": {
+      "command": "python",
+      "args": ["mcp_server.py"]
+      }
+}
