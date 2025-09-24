@@ -15,9 +15,11 @@ init(autoreset=True)
 load_dotenv()
 logs = []
 
-LOCAL_URL = os.getenv("LOCAL_URL", "http://localhost:8080/mcp")
+LOCAL_URL = os.getenv("LOCAL_URL", "http://127.0.0.1:8000")
 REMOTE_URL = os.getenv("REMOTE_URL", "https://flightbookingU.fastmcp.app/mcp")
 
+# File path for the chat log
+CHAT_LOG_FILE = "chat_log.json"
 
 def print_heading(heading: str):
     print(Fore.CYAN + Style.BRIGHT + f"=== {heading} ===")
@@ -45,6 +47,18 @@ async def call_mcp_tool(tool: str, params: dict, url: str):
     client = FastMCPClient(url)
     async with client:
         return await client.call_tool(tool, params)
+
+def load_chat_log():
+    """Load chat log from file."""
+    if os.path.exists(CHAT_LOG_FILE):
+        with open(CHAT_LOG_FILE, 'r') as file:
+            return json.load(file)
+    return []
+
+def save_chat_log(logs):
+    """Save chat log to file."""
+    with open(CHAT_LOG_FILE, 'w') as file:
+        json.dump(logs, file, indent=4)
 
 # =========================
 # Load MCP tools dynamically
@@ -75,26 +89,6 @@ tools = [
             required=["tool_name"]
         )
     ),
-        genai.protos.FunctionDeclaration(
-        name="call_mcp_remote",
-        description="Call a tool on the REMOTE MCP server (flight booking).",
-        parameters=genai.protos.Schema(
-            type=genai.protos.Type.OBJECT,
-            properties={
-                "tool_name": genai.protos.Schema(
-                    type=genai.protos.Type.STRING,
-                    enum=[t.name for t in remote_tools],
-                    description="The tool name to call."
-                ),
-                "params": genai.protos.Schema(
-                    type=genai.protos.Type.OBJECT,
-                    description="Parameters for the tool call. "
-                                "For example, 'search_cheapest_flights' only accepts {limit, max_stops}."
-                )
-            },
-            required=["tool_name"]
-        )
-    )
 ]
 
 print("Local tools:", [t.name for t in local_tools])
@@ -116,6 +110,12 @@ except Exception as e:
 # =========================
 print_heading("Chat CLI with Gemini + MCP Function Calling")
 print_info("Type 'exit' to quit.\n")
+
+# Load chat log before starting
+chat_log = load_chat_log()
+for entry in chat_log:
+    print(Fore.WHITE + f"You: {entry['user_input']}")
+    print(Fore.BLUE + f"Gemini: {entry['gemini_response']}")
 
 while True:
     user_input = input(Fore.WHITE + "You: ")
@@ -163,6 +163,13 @@ while True:
 
         if not handled:
             print(Fore.BLUE + f"Gemini: {resp.text}\n")
+
+        # Save chat log
+        chat_log.append({
+            "user_input": user_input,
+            "gemini_response": resp.text
+        })
+        save_chat_log(chat_log)
 
     except Exception as e:
         print_error(f"Error with Gemini: {e}")
