@@ -37,6 +37,26 @@ class MCPManager:
             }
         }
         # For stdio servers, we need to use subprocess communication
+                # Start the mcp_server_git process (subprocess)
+        try:
+            print_info("Starting mcp_server_git...")
+            process = await asyncio.create_subprocess_exec(
+                "python", "-m", "mcp_server_git",
+                cwd=work_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                print_info("mcp_server_git started successfully")
+            else:
+                print_error(f"Error starting mcp_server_git: {stderr.decode()}")
+
+        except Exception as e:
+            print_error(f"Failed to start mcp_server_git: {e}")
+        
+        # Now load tools from the Python server
         await self._load_tools_from_stdio_server(alias, python_script_path, work_dir)
 
     async def add_npx_server(self, alias: str, package_name: str, *args, work_dir: str = "."):
