@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import asyncio
+import subprocess
 from dotenv import load_dotenv
 from fastmcp import Client as FastMCPClient
 from colorama import Fore, Style, init
@@ -13,36 +14,219 @@ load_dotenv()
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # =========================
-# MCP Manager
+# Enhanced MCP Manager with Multiple Transport Support
 # =========================
 class MCPManager:
     def __init__(self):
-        self.servers = {}   # {alias: {"url": str}}
+        self.servers = {}   # {alias: {"type": "http|stdio|npx", "config": {...}}}
         self.tools = []     # merged tools with server alias
 
-    async def add_server(self, alias: str, target: str):
-        """Register an MCP server (auto-detect http or stdio)."""
-        self.servers[alias] = {"url": target}
-        client = FastMCPClient(target)   # no transport arg
-        async with client:
-            tools = await client.list_tools()
-            for t in tools:
-                # Modify the schema to match what Claude expects
-                modified_schema = self._modify_tool_schema(t.name, getattr(t, "input_schema", {"type": "object"}))
-                
+    async def add_http_server(self, alias: str, url: str):
+        """Add HTTP-based MCP server (like your flight booking server)."""
+        self.servers[alias] = {"type": "http", "config": {"url": url}}
+        await self._load_tools_from_server(alias, url)
+
+    async def add_python_stdio_server(self, alias: str, python_script_path: str, work_dir: str = "."):
+        """Add Python-based stdio MCP server."""
+        self.servers[alias] = {
+            "type": "stdio", 
+            "config": {
+                "command": "python",
+                "args": [python_script_path],
+                "cwd": work_dir
+            }
+        }
+        # For stdio servers, we need to use subprocess communication
+        await self._load_tools_from_stdio_server(alias, python_script_path, work_dir)
+
+    async def add_npx_server(self, alias: str, package_name: str, *args, work_dir: str = "."):
+        """Add NPX-based MCP server (like the official filesystem server)."""
+        self.servers[alias] = {
+            "type": "npx",
+            "config": {
+                "command": "npx",
+                "args": [package_name] + list(args),
+                "cwd": work_dir
+            }
+        }
+        await self._load_tools_from_npx_server(alias, package_name, args, work_dir)
+
+    async def _load_tools_from_server(self, alias: str, url: str):
+        """Load tools from HTTP server using FastMCP."""
+        try:
+            client = FastMCPClient(url)
+            async with client:
+                tools = await client.list_tools()
+                for t in tools:
+                    modified_schema = self._modify_tool_schema(t.name, getattr(t, "input_schema", {"type": "object"}))
+                    self.tools.append({
+                        "server": alias,
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": modified_schema
+                    })
+                print_info(f"Loaded {len(tools)} tools from HTTP server '{alias}'")
+        except Exception as e:
+            print_error(f"Failed to load tools from {alias}: {e}")
+
+    async def _load_tools_from_stdio_server(self, alias: str, script_path: str, work_dir: str):
+        """Load tools from Python stdio server."""
+        # For stdio servers, we need a different approach
+        # This is a placeholder - you'll need to implement MCP stdio communication
+        print_info(f"STDIO server '{alias}' registered (tools will be discovered on first use)")
+        
+        # Add some common filesystem/git tools manually for now
+        common_tools = [
+            {"name": "read_file", "description": "Read file contents"},
+            {"name": "write_file", "description": "Write file contents"},
+            {"name": "list_directory", "description": "List directory contents"},
+            {"name": "create_directory", "description": "Create directory"},
+            {"name": "git_init", "description": "Initialize git repository"},
+            {"name": "git_add", "description": "Add files to git"},
+            {"name": "git_commit", "description": "Commit changes"},
+            {"name": "git_status", "description": "Get git status"}
+        ]
+        
+        for tool in common_tools:
+            modified_schema = self._modify_tool_schema(tool["name"], {"type": "object"})
+            self.tools.append({
+                "server": alias,
+                "name": tool["name"], 
+                "description": tool["description"],
+                "input_schema": modified_schema
+            })
+
+    async def _load_tools_from_npx_server(self, alias: str, package_name: str, args: tuple, work_dir: str):
+        """Load tools from NPX server."""
+        print_info(f"NPX server '{alias}' registered with package '{package_name}'")
+        
+        # For the official filesystem server, add known tools
+        if "server-filesystem" in package_name:
+            filesystem_tools = [
+                {"name": "read_file", "description": "Read the contents of a file"},
+                {"name": "write_file", "description": "Write content to a file"}, 
+                {"name": "list_directory", "description": "List the contents of a directory"},
+                {"name": "create_directory", "description": "Create a new directory"},
+                {"name": "delete_file", "description": "Delete a file"},
+                {"name": "git_init", "description": "Initialize a new git repository"},
+                {"name": "git_status", "description": "Get git status"},
+                {"name": "git_add", "description": "Add files to git staging area"},
+                {"name": "git_commit", "description": "Commit staged changes"},
+                {"name": "git_log", "description": "Get the git commit history"},
+                {"name": "git_branch", "description": "List git branches"},
+                {"name": "git_diff", "description": "Show git diff for changes"}
+            ]
+            
+            for tool in filesystem_tools:
+                modified_schema = self._modify_tool_schema(tool["name"], {"type": "object"})
                 self.tools.append({
                     "server": alias,
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": modified_schema  # Use modified schema
+                    "name": tool["name"],
+                    "description": tool["description"], 
+                    "input_schema": modified_schema
                 })
+
+    async def call_tool(self, server_alias: str, tool_name: str, params: dict):
+        """Route tool call to appropriate server type."""
+        server = self.servers.get(server_alias)
+        if not server:
+            raise ValueError(f"No such MCP server: {server_alias}")
+
+        mapped_params = self._map_parameters(tool_name, params)
+        
+        if server["type"] == "http":
+            return await self._call_http_tool(server["config"]["url"], tool_name, mapped_params)
+        elif server["type"] == "stdio":
+            return await self._call_stdio_tool(server["config"], tool_name, mapped_params)
+        elif server["type"] == "npx":
+            return await self._call_npx_tool(server["config"], tool_name, mapped_params)
+        else:
+            raise ValueError(f"Unsupported server type: {server['type']}")
+
+    async def _call_http_tool(self, url: str, tool_name: str, params: dict):
+        """Call tool on HTTP server."""
+        client = FastMCPClient(url)
+        async with client:
+            return await client.call_tool(tool_name, params)
+
+    async def _call_stdio_tool(self, config: dict, tool_name: str, params: dict):
+        """Call tool on stdio server."""
+        # This is a simplified implementation
+        # In a real implementation, you'd maintain persistent stdio connections
+        try:
+            cmd = [config["command"]] + config["args"] + ["--tool", tool_name]
+            
+            # Convert params to command line arguments
+            for key, value in params.items():
+                cmd.extend([f"--{key}", str(value)])
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=config["cwd"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                # Mock response format
+                return type('MockResult', (), {
+                    'content': [type('MockContent', (), {'text': stdout.decode()})()]
+                })()
+            else:
+                raise Exception(f"Tool execution failed: {stderr.decode()}")
+                
+        except Exception as e:
+            raise Exception(f"STDIO tool call failed: {e}")
+
+    async def _call_npx_tool(self, config: dict, tool_name: str, params: dict):
+        """Call tool on NPX server."""
+        try:
+            # Build command for NPX server
+            cmd = config["args"].copy()  # Start with base npx command
+            
+            # Add tool-specific logic here
+            if tool_name == "read_file":
+                file_path = params.get("file_path") or params.get("path")
+                if file_path:
+                    # Simple file read using cat (this is a fallback)
+                    process = await asyncio.create_subprocess_exec(
+                        "cat", file_path,
+                        cwd=config["cwd"],
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await process.communicate()
+                    if process.returncode == 0:
+                        return type('MockResult', (), {
+                            'content': [type('MockContent', (), {'text': stdout.decode()})()]
+                        })()
+            
+            elif tool_name == "git_init":
+                repo_path = params.get("repo_path") or params.get("path") or "."
+                process = await asyncio.create_subprocess_exec(
+                    "git", "init",
+                    cwd=os.path.join(config["cwd"], repo_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                result_text = stdout.decode() + stderr.decode()
+                return type('MockResult', (), {
+                    'content': [type('MockContent', (), {'text': result_text})()]
+                })()
+            
+            # Add more tool implementations as needed
+            raise Exception(f"Tool '{tool_name}' not implemented for NPX server")
+            
+        except Exception as e:
+            raise Exception(f"NPX tool call failed: {e}")
 
     def _modify_tool_schema(self, tool_name: str, original_schema: dict) -> dict:
         """Modify tool schemas to match what Claude expects to send."""
-        
-        # Define schema modifications for specific tools
         schema_modifications = {
-            # Flight booking tools - add common parameters Claude might use
+            # Flight booking tools
             'search_cheapest_flights': {
                 'type': 'object',
                 'properties': {
@@ -52,22 +236,36 @@ class MCPManager:
                     'max_stops': {'type': 'integer', 'description': 'Maximum stops', 'default': 2}
                 }
             },
-            'search_flights': {
-                'type': 'object', 
+            # File operations
+            'read_file': {
+                'type': 'object',
                 'properties': {
-                    'origin': {'type': 'string', 'description': 'Origin city'},
-                    'destination': {'type': 'string', 'description': 'Destination city'},
-                    'from_city': {'type': 'string', 'description': 'From city'},
-                    'to_city': {'type': 'string', 'description': 'To city'},
-                    'limit': {'type': 'integer', 'description': 'Number of results', 'default': 10},
-                    'max_price': {'type': 'number', 'description': 'Maximum price', 'default': 0},
-                    'min_price': {'type': 'number', 'description': 'Minimum price', 'default': 0},
-                    'airline': {'type': 'string', 'description': 'Airline filter', 'default': ''},
-                    'class_type': {'type': 'string', 'description': 'Class type filter', 'default': ''},
-                    'max_stops': {'type': 'integer', 'description': 'Maximum stops', 'default': -1}
+                    'path': {'type': 'string', 'description': 'File path to read'}
+                },
+                'required': ['path']
+            },
+            'write_file': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string', 'description': 'File path to write'},
+                    'content': {'type': 'string', 'description': 'Content to write'}
+                },
+                'required': ['path', 'content']
+            },
+            'list_directory': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string', 'description': 'Directory path to list', 'default': '.'}
                 }
             },
-            # Git tools - Claude expects 'directory' parameter
+            'create_directory': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string', 'description': 'Directory path to create'}
+                },
+                'required': ['path']
+            },
+            # Git operations
             'git_init': {
                 'type': 'object',
                 'properties': {
@@ -87,42 +285,38 @@ class MCPManager:
                     'directory': {'type': 'string', 'description': 'Repository directory', 'default': '.'},
                     'message': {'type': 'string', 'description': 'Commit message', 'default': 'Automated commit'}
                 }
-            },
-            'git_status': {
-                'type': 'object',
-                'properties': {
-                    'directory': {'type': 'string', 'description': 'Repository directory', 'default': '.'}
-                }
-            },
-            # File operations - Claude expects 'path' parameter
-            'create_directory': {
-                'type': 'object',
-                'properties': {
-                    'path': {'type': 'string', 'description': 'Directory path to create'}
-                }
-            },
-            'read_file': {
-                'type': 'object',
-                'properties': {
-                    'path': {'type': 'string', 'description': 'File path to read'}
-                }
-            },
-            'write_file': {
-                'type': 'object',
-                'properties': {
-                    'path': {'type': 'string', 'description': 'File path to write'},
-                    'content': {'type': 'string', 'description': 'Content to write'}
-                }
-            },
-            'list_directory': {
-                'type': 'object',
-                'properties': {
-                    'path': {'type': 'string', 'description': 'Directory path to list', 'default': '.'}
-                }
             }
         }
         
         return schema_modifications.get(tool_name, original_schema)
+
+    def _map_parameters(self, tool_name: str, params: dict) -> dict:
+        """Map parameters to match server expectations."""
+        parameter_mappings = {
+            # File operations - NPX filesystem server expects these names
+            'read_file': {'path': 'file_path'},
+            'write_file': {'path': 'file_path'},
+            'list_directory': {'path': 'directory_path'}, 
+            'create_directory': {'path': 'directory_path'},
+            
+            # Git operations - map directory to repo_path
+            'git_init': {'directory': 'path'},
+            'git_add': {'directory': 'repo_path'},
+            'git_commit': {'directory': 'repo_path'},
+            
+            # Flight search
+            'search_cheapest_flights': {'origin': 'from_city', 'destination': 'to_city'}
+        }
+        
+        mapping = parameter_mappings.get(tool_name, {})
+        mapped_params = {}
+        
+        for key, value in params.items():
+            mapped_key = mapping.get(key, key)
+            if mapped_key is not None:
+                mapped_params[mapped_key] = value
+        
+        return mapped_params
 
     def debug_tool_schemas(self):
         """Print all tool schemas for debugging."""
@@ -133,81 +327,23 @@ class MCPManager:
             print(f"{Fore.MAGENTA}Schema: {json.dumps(tool['input_schema'], indent=2)}")
         print(Fore.CYAN + "\n=== END SCHEMAS DEBUG ===\n")
 
-    async def call_tool(self, server_alias: str, tool_name: str, params: dict):
-        """Route a tool call to the correct MCP server."""
-        server = self.servers.get(server_alias)
-        if not server:
-            raise ValueError(f"No such MCP server: {server_alias}")
-        
-        # Apply parameter mapping if needed
-        mapped_params = self._map_parameters(tool_name, params)
-        
-        client = FastMCPClient(server["url"])  # auto-detect again
-        async with client:
-            return await client.call_tool(tool_name, mapped_params)
-        
-    def _map_parameters(self, tool_name: str, params: dict) -> dict:
-        """Map parameters to match MCP server expectations."""
-        # Define parameter mappings for specific tools
-        parameter_mappings = {
-            # File operations
-            'create_directory': {'path': 'directory_path'},
-            'write_file': {'path': 'file_path'},
-            'read_file': {'path': 'file_path'},
-            'delete_file': {'path': 'file_path'},
-            'list_directory': {'path': 'directory_path'},
-            
-            # Git commands - map Claude's 'directory' to server's 'repo_path'
-            'git_init': {'directory': 'repo_path'},
-            'git_add': {'directory': 'repo_path'},
-            'git_commit': {'directory': 'repo_path'},
-            'git_status': {'directory': 'repo_path'},
-            'git_log': {'directory': 'repo_path'},
-            'git_branch': {'directory': 'repo_path'},
-            'git_diff': {'directory': 'repo_path'},
-            
-            # Flight search - map common parameters
-            'search_cheapest_flights': {
-                'origin': 'from_city',
-                'destination': 'to_city'
-            },
-            'search_flights': {
-                'origin': 'from_city', 
-                'destination': 'to_city'
-            }
-        }
-        
-        mapping = parameter_mappings.get(tool_name, {})
-        mapped_params = {}
-        
-        for key, value in params.items():
-            # Use mapped parameter name if it exists, otherwise use original
-            mapped_key = mapping.get(key, key)
-            if mapped_key is not None:  # Only add if mapping isn't explicitly None
-                mapped_params[mapped_key] = value
-            
-        return mapped_params
-
     def get_tools_for_claude(self):
         """Format tools into Claude's schema with server prefix."""
         tools_for_claude = []
         for t in self.tools:
-            # Use underscore instead of double colon to comply with Claude's naming pattern
             claude_tool_name = f"{t['server']}_{t['name']}"
             tools_for_claude.append({
                 "name": claude_tool_name,
-                "description": f"[{t['server']}] {t['description']}",  # Add server context to description
+                "description": f"[{t['server']}] {t['description']}",
                 "input_schema": t["input_schema"]
             })
         return tools_for_claude
 
     def parse_tool_name(self, claude_tool_name: str):
         """Parse Claude tool name back to server alias and original tool name."""
-        # Find the first underscore to split server alias from tool name
         parts = claude_tool_name.split('_', 1)
         if len(parts) == 2:
             return parts[0], parts[1]
-        # Fallback: assume it's just the tool name with no server prefix
         return None, claude_tool_name
 
 # =========================
@@ -229,29 +365,36 @@ def print_tool_result(result):
     print(Fore.MAGENTA + f"[TOOL RESULT] {result}")
 
 # =========================
-# Setup MCP Manager
+# Setup MCP Manager with Multiple Server Types
 # =========================
 async def setup_mcp():
     manager = MCPManager()
-    # Updated paths - filesystem server should be in same directory
-    await manager.add_server("local", "../filesystem/mcp_server.py")
-    # Optional: comment out the remote server if you don't have access
-    await manager.add_server("remote", "https://flightbookingU.fastmcp.app/mcp")
+    
+    # Add HTTP server (your flight booking server)
+    await manager.add_http_server("remote", "https://flightbookingU.fastmcp.app/mcp")
+    
+    # Add NPX-based official filesystem server
+    # First install it: npm install -g @modelcontextprotocol/server-filesystem
+    await manager.add_npx_server("fs", "@modelcontextprotocol/server-filesystem", "/Users/youruser/allowed-directory")
+    
+    # Add Python stdio server (your custom server)
+    # await manager.add_python_stdio_server("local", "../filesystem/mcp_server.py")
+    
     return manager
 
 # =========================
-# Main Loop
+# Main Loop (same as before)
 # =========================
 async def main():
     try:
+        print_info("Setting up MCP servers...")
         manager = await setup_mcp()
         
-        # DEBUG: Print tool schemas to see what parameters are expected
-        manager.debug_tool_schemas()  # Add this line for debugging
+        manager.debug_tool_schemas()
         
         tools = manager.get_tools_for_claude()
         
-        print_heading("Chat CLI with Claude + MCPManager")
+        print_heading("Enhanced MCP Client with Multiple Server Support")
         print_info(f"Loaded {len(tools)} tools from MCP servers")
         print_info("Type 'exit' to quit, 'debug' to see tool schemas again.\n")
 
@@ -280,14 +423,12 @@ async def main():
                 assistant_content = []
                 tool_results = []
                 
-                # Process all content parts
                 for part in resp.content:
                     if part.type == "text":
                         assistant_content.append(part)
                     elif part.type == "tool_use":
                         assistant_content.append(part)
                         
-                        # Parse server alias and tool name from Claude's tool name
                         server_alias, tool_name = manager.parse_tool_name(part.name)
                         params = part.input
 
@@ -299,29 +440,21 @@ async def main():
                             print_error(f"Could not parse server alias from tool name: {part.name}")
                             continue
                         
-                        # Extract the actual result from the CallToolResult object
+                        # Extract result
                         if hasattr(raw_result, 'content') and raw_result.content:
-                            # Get the first content item (usually TextContent)
                             first_content = raw_result.content[0]
                             if hasattr(first_content, 'text'):
                                 try:
-                                    # Try to parse as JSON first
                                     tool_result = json.loads(first_content.text)
                                 except json.JSONDecodeError:
-                                    # If not JSON, use as plain text
                                     tool_result = {"response": first_content.text}
                             else:
                                 tool_result = {"response": str(first_content)}
-                        elif hasattr(raw_result, 'data') and raw_result.data:
-                            # Use the structured data if available
-                            tool_result = raw_result.data
                         else:
-                            # Fallback to string representation
                             tool_result = {"response": str(raw_result)}
 
                         print_tool_result(tool_result)
                         
-                        # Collect tool result for batch processing
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": part.id,
@@ -329,15 +462,10 @@ async def main():
                         })
                         handled = True
 
-                # If we had tool calls, process them
                 if handled:
-                    # Add assistant message with tool calls
                     history.append({"role": "assistant", "content": assistant_content})
-                    
-                    # Add tool results as user message
                     history.append({"role": "user", "content": tool_results})
 
-                    # Get Claude's final response
                     followup = client.messages.create(
                         model="claude-sonnet-4-20250514",
                         max_tokens=500,
@@ -345,10 +473,7 @@ async def main():
                         messages=history
                     )
                     
-                    # Extract text response
                     text_response = "".join([p.text for p in followup.content if p.type == "text"])
-                    
-                    # Handle empty responses
                     if not text_response.strip():
                         text_response = "Task completed successfully."
                     
@@ -362,12 +487,10 @@ async def main():
 
             except Exception as e:
                 print_error(f"Error with Claude: {e}")
-                # Continue the loop instead of crashing
                 continue
                 
     except Exception as e:
         print_error(f"Failed to setup MCP manager: {e}")
-        print_info("Make sure the filesystem MCP server is properly set up")
 
 if __name__ == "__main__":
     asyncio.run(main())
