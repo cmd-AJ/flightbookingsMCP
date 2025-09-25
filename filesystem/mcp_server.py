@@ -1,235 +1,320 @@
+#!/usr/bin/env python3
+"""
+Filesystem MCP Server
+Provides file system operations and git functionality
+"""
 
 import os
+import sys
+import json
 import subprocess
 from pathlib import Path
+from typing import Dict, Any, List
 from fastmcp import FastMCP
-import sys 
-# Create the MCP server
-mcp = FastMCP("filesystem-git-server")
-import logging
 
-# =============================================================================
-# FILESYSTEM TOOLS
-# =============================================================================
+# Initialize the MCP server
+mcp = FastMCP("Filesystem")
 
 @mcp.tool()
-def read_file(file_path: str) -> str:
+def read_file(file_path: str) -> Dict[str, Any]:
     """Read the contents of a file"""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        path = Path(file_path)
+        if not path.exists():
+            return {"error": f"File not found: {file_path}"}
+        
+        with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
-        return f"File content:\n{content}"
-    except FileNotFoundError:
-        return f"Error: File '{file_path}' not found"
-    except PermissionError:
-        return f"Error: Permission denied to read '{file_path}'"
+        
+        return {
+            "success": True,
+            "content": content,
+            "file_path": str(path.absolute())
+        }
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        return {"error": f"Failed to read file: {str(e)}"}
 
 @mcp.tool()
-def write_file(file_path: str, content: str) -> str:
+def write_file(file_path: str, content: str) -> Dict[str, Any]:
     """Write content to a file"""
     try:
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        path = Path(file_path)
         
-        with open(file_path, 'w', encoding='utf-8') as f:
+        # Create parent directories if they don't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
-        return f"Successfully wrote {len(content)} characters to '{file_path}'"
-    except PermissionError:
-        return f"Error: Permission denied to write to '{file_path}'"
+        
+        return {
+            "success": True,
+            "message": f"Successfully wrote to {file_path}",
+            "file_path": str(path.absolute())
+        }
     except Exception as e:
-        return f"Error writing file: {str(e)}"
+        return {"error": f"Failed to write file: {str(e)}"}
 
 @mcp.tool()
-def list_directory(directory_path: str = ".") -> str:
+def list_directory(directory_path: str = ".") -> Dict[str, Any]:
     """List the contents of a directory"""
     try:
         path = Path(directory_path)
         if not path.exists():
-            return f"Error: Directory '{directory_path}' does not exist"
+            return {"error": f"Directory not found: {directory_path}"}
+        
+        if not path.is_dir():
+            return {"error": f"Path is not a directory: {directory_path}"}
         
         items = []
-        for item in sorted(path.iterdir()):
-            item_type = "📁" if item.is_dir() else "📄"
-            size = f" ({item.stat().st_size} bytes)" if item.is_file() else ""
-            items.append(f"{item_type} {item.name}{size}")
+        for item in path.iterdir():
+            items.append({
+                "name": item.name,
+                "type": "directory" if item.is_dir() else "file",
+                "path": str(item.absolute())
+            })
         
-        return f"Contents of '{directory_path}':\n" + "\n".join(items)
-    except PermissionError:
-        return f"Error: Permission denied to access '{directory_path}'"
+        return {
+            "success": True,
+            "directory": str(path.absolute()),
+            "items": items
+        }
     except Exception as e:
-        return f"Error listing directory: {str(e)}"
+        return {"error": f"Failed to list directory: {str(e)}"}
 
 @mcp.tool()
-def create_directory(directory_path: str) -> str:
+def create_directory(directory_path: str) -> Dict[str, Any]:
     """Create a new directory"""
     try:
-        os.makedirs(directory_path, exist_ok=True)
-        return f"Successfully created directory '{directory_path}'"
-    except PermissionError:
-        return f"Error: Permission denied to create '{directory_path}'"
+        path = Path(directory_path)
+        path.mkdir(parents=True, exist_ok=True)
+        
+        return {
+            "success": True,
+            "message": f"Successfully created directory: {directory_path}",
+            "directory_path": str(path.absolute())
+        }
     except Exception as e:
-        return f"Error creating directory: {str(e)}"
+        return {"error": f"Failed to create directory: {str(e)}"}
 
 @mcp.tool()
-def delete_file(file_path: str) -> str:
+def delete_file(file_path: str) -> Dict[str, Any]:
     """Delete a file"""
     try:
-        os.remove(file_path)
-        return f"Successfully deleted '{file_path}'"
-    except FileNotFoundError:
-        return f"Error: File '{file_path}' not found"
-    except PermissionError:
-        return f"Error: Permission denied to delete '{file_path}'"
+        path = Path(file_path)
+        if not path.exists():
+            return {"error": f"File not found: {file_path}"}
+        
+        path.unlink()
+        
+        return {
+            "success": True,
+            "message": f"Successfully deleted file: {file_path}"
+        }
     except Exception as e:
-        return f"Error deleting file: {str(e)}"
+        return {"error": f"Failed to delete file: {str(e)}"}
 
-# =============================================================================
-# GIT TOOLS
-# =============================================================================
-def run_git_command(cmd, repo_path="."):
-    """Run a git command safely (no pager, no prompts)."""
+@mcp.tool()
+def git_init(path: str = ".") -> Dict[str, Any]:
+    """Initialize a new git repository"""
     try:
-        if not os.path.exists(os.path.join(repo_path, ".git")):
-            return False, f"Not a git repository: {repo_path}"
-
-        full_cmd = ["git", "--no-pager"] + cmd
-        env = os.environ.copy()
-        env["GIT_TERMINAL_PROMPT"] = "0"
+        repo_path = Path(path)
+        if not repo_path.exists():
+            return {"error": f"Directory not found: {path}"}
 
         result = subprocess.run(
-            full_cmd,
+            ["git", "init"],
             cwd=repo_path,
             capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=env
+            text=True
         )
+
         if result.returncode == 0:
-            return True, result.stdout.strip()
-        return False, result.stderr.strip() or result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        return False, "Git command timed out"
+            return {
+                "success": True,
+                "message": f"Initialized git repository in {path}",
+                "output": result.stdout.strip()
+            }
+        else:
+            return {"error": f"Git init failed: {result.stderr}"}
     except Exception as e:
-        return False, f"Error: {e}"
-
-
-@mcp.tool()
-def git_init(repo_path: str = ".") -> str:
-    """Initialize a new git repository"""
-    success, output = run_git_command(["init"], repo_path)
-    
-    if not success:
-        return f"Error initializing git repository: {output}"
-    
-    return f"Successfully initialized git repository in '{repo_path}'\n{output}"
+        return {"error": f"Failed to initialize git repository: {str(e)}"}
 
 @mcp.tool()
-def git_status(repo_path: str = ".") -> str:
-    ok, out = run_git_command(["status", "--short", "--untracked-files=all"], repo_path)
-    if not ok:
-        return f"Error: {out}"
-    return "Repository is clean" if not out else f"Git status:\n{out}"
+def git_status(repo_path: str = ".") -> Dict[str, Any]:
+    """Get git status"""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "status": result.stdout,
+                "repo_path": str(Path(repo_path).absolute())
+            }
+        else:
+            return {"error": f"Git status failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"Failed to get git status: {str(e)}"}
 
 @mcp.tool()
-def git_log(repo_path: str = ".", limit: int = 10) -> str:
-    """Get the git commit history"""
-    success, output = run_git_command(["log", f"--max-count={limit}", "--oneline", "--decorate"], repo_path)
-    
-    if not success:
-        return f"Error getting git log: {output}"
-    
-    return f"Recent commits (last {limit}):\n{output}"
-
-@mcp.tool()
-def git_branch(repo_path: str = ".") -> str:
-    """List git branches"""
-    success, output = run_git_command(["branch", "-v"], repo_path)
-    
-    if not success:
-        return f"Error getting git branches: {output}"
-    
-    return f"Git branches:\n{output}"
-
-@mcp.tool()
-def git_diff(repo_path: str = ".", file_path: str = "") -> str:
-    """Show git diff for changes"""
-    cmd = ["diff"]
-    if file_path:
-        cmd.append(file_path)
-    
-    success, output = run_git_command(cmd, repo_path)
-    
-    if not success:
-        return f"Error getting git diff: {output}"
-    
-    if not output.strip():
-        return "No changes to show"
-    
-    return f"Git diff:\n{output}"
-
-@mcp.tool()
-def git_add(repo_path: str = ".", file_path: str = ".") -> str:
+def git_add(file_path: str = ".", repo_path: str = ".") -> Dict[str, Any]:
     """Add files to git staging area"""
-    success, output = run_git_command(["add", file_path], repo_path)
-    
-    if not success:
-        return f"Error adding files to git: {output}"
-    
-    return f"Successfully added '{file_path}' to staging area"
+    try:
+        result = subprocess.run(
+            ["git", "add", file_path],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "message": f"Added {file_path} to staging area"
+            }
+        else:
+            return {"error": f"Git add failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"Failed to add files to git: {str(e)}"}
 
 @mcp.tool()
-def git_commit(repo_path: str = ".", message: str = "Automated commit") -> str:
+def git_commit(message: str = "Automated commit", repo_path: str = ".") -> Dict[str, Any]:
     """Commit staged changes"""
-    success, output = run_git_command(["commit", "-m", message], repo_path)
-    
-    if not success:
-        # Check if it's because there's nothing to commit
-        if "nothing to commit" in output.lower():
-            return "Nothing to commit - working tree clean"
-        return f"Error committing changes: {output}"
-    
-    return f"Successfully committed with message: '{message}'\n{output}"
+    try:
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "message": f"Committed changes with message: {message}",
+                "output": result.stdout.strip()
+            }
+        else:
+            return {"error": f"Git commit failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"Failed to commit changes: {str(e)}"}
 
 @mcp.tool()
-def manual_git_commands(repo_path: str = ".") -> str:
+def git_log(limit: int = 10, repo_path: str = ".") -> Dict[str, Any]:
+    """Get the git commit history"""
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--max-count={limit}", "--oneline"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            commits = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split(' ', 1)
+                    commits.append({
+                        "hash": parts[0],
+                        "message": parts[1] if len(parts) > 1 else ""
+                    })
+            
+            return {
+                "success": True,
+                "commits": commits,
+                "repo_path": str(Path(repo_path).absolute())
+            }
+        else:
+            return {"error": f"Git log failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"Failed to get git log: {str(e)}"}
+
+@mcp.tool()
+def git_branch(repo_path: str = ".") -> Dict[str, Any]:
+    """List git branches"""
+    try:
+        result = subprocess.run(
+            ["git", "branch"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            branches = []
+            current_branch = None
+            
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    if line.startswith('* '):
+                        current_branch = line[2:].strip()
+                        branches.append(current_branch)
+                    else:
+                        branches.append(line.strip())
+            
+            return {
+                "success": True,
+                "branches": branches,
+                "current_branch": current_branch,
+                "repo_path": str(Path(repo_path).absolute())
+            }
+        else:
+            return {"error": f"Git branch failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"Failed to list git branches: {str(e)}"}
+
+@mcp.tool()
+def git_diff(file_path: str = "", repo_path: str = ".") -> Dict[str, Any]:
+    """Show git diff for changes"""
+    try:
+        cmd = ["git", "diff"]
+        if file_path:
+            cmd.append(file_path)
+        
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "diff": result.stdout,
+                "file_path": file_path,
+                "repo_path": str(Path(repo_path).absolute())
+            }
+        else:
+            return {"error": f"Git diff failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"Failed to get git diff: {str(e)}"}
+
+@mcp.tool()
+def manual_git_commands(repo_path: str = ".") -> Dict[str, Any]:
     """Provide manual git commands to run in terminal"""
-    readme_path = os.path.join(repo_path, "README.md")
-    
-    commands = f"""
-Since git operations through MCP might have permission issues, here are the manual commands to run:
-
-1. Open Command Prompt or Terminal
-2. Navigate to your project:
-   cd "{repo_path}"
-
-3. Add the README file:
-   git add README.md
-
-4. Commit the changes:
-   git commit -m "Add comprehensive README documentation"
-
-5. Check status:
-   git status
-
-6. Push to remote (if you have one set up):
-   git push origin master
-
-Alternatively, you can use Git GUI or your IDE's git integration.
-"""
-    return commands
-
-# =============================================================================
-# RUN THE SERVER
-# =============================================================================
+    return {
+        "success": True,
+        "message": "Here are some common git commands you can run manually:",
+        "commands": [
+            "git init - Initialize a new git repository",
+            "git status - Check the status of your repository",
+            "git add <file> - Add files to staging area",
+            "git add . - Add all files to staging area",
+            "git commit -m 'message' - Commit staged changes",
+            "git log - View commit history",
+            "git branch - List branches",
+            "git diff - Show changes"
+        ],
+        "repo_path": str(Path(repo_path).absolute())
+    }
 
 if __name__ == "__main__":
-    # Loguea a stderr (no uses print a stdout)
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
-    logging.info("Starting filesystem-git MCP server…")
-    try:
-        mcp.run()
-    except Exception as e:
-        logging.exception("Failed to start server: %s", e)
+    # Run the MCP server
+    mcp.run(transport="stdio")
