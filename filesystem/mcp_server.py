@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Filesystem MCP Server
-Provides file system operations and git functionality
+Provides file system operations
 """
 
 import os

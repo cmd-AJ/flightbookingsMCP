@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import asyncio
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from fastmcp import Client as FastMCPClient
 from colorama import Fore, Style, init
@@ -11,6 +13,139 @@ init(autoreset=True)
 load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# =========================
+# Chat Log Manager
+# =========================
+class ChatLogManager:
+    def __init__(self, logs_directory="chat_logs"):
+        self.logs_dir = Path(logs_directory)
+        self.logs_dir.mkdir(exist_ok=True)
+        self.current_session_file = None
+        
+    def create_new_session(self, session_name=None):
+        """Create a new chat session file."""
+        if not session_name:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            session_name = f"chat_{timestamp}"
+        
+        self.current_session_file = self.logs_dir / f"{session_name}.json"
+        
+        # Initialize with metadata
+        session_data = {
+            "session_name": session_name,
+            "created_at": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat(),
+            "message_count": 0,
+            "history": []
+        }
+        
+        self.save_session_data(session_data)
+        return session_name
+    
+    def load_session(self, session_name):
+        """Load an existing chat session."""
+        session_file = self.logs_dir / f"{session_name}.json"
+        if not session_file.exists():
+            raise FileNotFoundError(f"Session {session_name} not found")
+        
+        self.current_session_file = session_file
+        with open(session_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def save_session_data(self, session_data):
+        """Save session data to current session file."""
+        if not self.current_session_file:
+            raise ValueError("No active session")
+        
+        session_data["last_updated"] = datetime.now().isoformat()
+        session_data["message_count"] = len(session_data["history"])
+        
+        with open(self.current_session_file, 'w', encoding='utf-8') as f:
+            json.dump(session_data, f, indent=2, ensure_ascii=False)
+    
+    def append_message(self, role, content, metadata=None):
+        """Append a message to the current session."""
+        if not self.current_session_file:
+            raise ValueError("No active session")
+        
+        # Load current data
+        session_data = self.load_current_session()
+        
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        if metadata:
+            message["metadata"] = metadata
+        
+        session_data["history"].append(message)
+        self.save_session_data(session_data)
+    
+    def load_current_session(self):
+        """Load current session data."""
+        if not self.current_session_file or not self.current_session_file.exists():
+            raise ValueError("No active session or session file missing")
+        
+        with open(self.current_session_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def list_sessions(self):
+        """List all available chat sessions."""
+        sessions = []
+        for file_path in self.logs_dir.glob("*.json"):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    sessions.append({
+                        "name": data.get("session_name", file_path.stem),
+                        "created_at": data.get("created_at", "Unknown"),
+                        "last_updated": data.get("last_updated", "Unknown"),
+                        "message_count": data.get("message_count", 0),
+                        "file": file_path.name
+                    })
+            except (json.JSONDecodeError, KeyError):
+                # Skip invalid files
+                continue
+        
+        return sorted(sessions, key=lambda x: x["last_updated"], reverse=True)
+    
+    def delete_session(self, session_name):
+        """Delete a chat session."""
+        session_file = self.logs_dir / f"{session_name}.json"
+        if session_file.exists():
+            session_file.unlink()
+            return True
+        return False
+    
+    def export_session(self, session_name, format="txt"):
+        """Export session to different formats."""
+        session_data = self.load_session(session_name)
+        
+        if format == "txt":
+            output_file = self.logs_dir / f"{session_name}.txt"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(f"Chat Session: {session_data['session_name']}\n")
+                f.write(f"Created: {session_data['created_at']}\n")
+                f.write(f"Messages: {session_data['message_count']}\n")
+                f.write("=" * 50 + "\n\n")
+                
+                for msg in session_data['history']:
+                    timestamp = msg.get('timestamp', '')
+                    role = msg['role'].upper()
+                    content = msg['content']
+                    
+                    if isinstance(content, list):
+                        # Handle complex content (tool calls, etc.)
+                        content_str = json.dumps(content, indent=2)
+                    else:
+                        content_str = str(content)
+                    
+                    f.write(f"[{timestamp}] {role}: {content_str}\n\n")
+        
+        return output_file
 
 # =========================
 # MCP Manager
@@ -228,6 +363,78 @@ def print_function_call(tool_name, params):
 def print_tool_result(result):
     print(Fore.MAGENTA + f"[TOOL RESULT] {result}")
 
+def print_session_info(session_name, message_count):
+    print(Fore.CYAN + f"[SESSION: {session_name}] Messages: {message_count}")
+
+# =========================
+# Session Management Commands
+# =========================
+def handle_session_commands(command_parts, log_manager):
+    """Handle session-related commands."""
+    if len(command_parts) < 2:
+        print_info("Session commands: /session new [name], /session load <name>, /session list, /session delete <name>, /session export <name>")
+        return False
+    
+    action = command_parts[1].lower()
+    
+    try:
+        if action == "new":
+            session_name = command_parts[2] if len(command_parts) > 2 else None
+            new_session = log_manager.create_new_session(session_name)
+            print_info(f"Created new session: {new_session}")
+            return True
+            
+        elif action == "load":
+            if len(command_parts) < 3:
+                print_error("Please specify session name: /session load <name>")
+                return False
+            session_name = command_parts[2]
+            session_data = log_manager.load_session(session_name)
+            print_info(f"Loaded session: {session_name} ({session_data['message_count']} messages)")
+            # Return the history for the main loop to use
+            return session_data['history']
+            
+        elif action == "list":
+            sessions = log_manager.list_sessions()
+            if not sessions:
+                print_info("No chat sessions found.")
+                return False
+                
+            print_heading("Available Chat Sessions")
+            for session in sessions:
+                created = datetime.fromisoformat(session['created_at']).strftime("%Y-%m-%d %H:%M")
+                updated = datetime.fromisoformat(session['last_updated']).strftime("%Y-%m-%d %H:%M")
+                print(f"{Fore.YELLOW}{session['name']:<20} {Fore.WHITE}Created: {created} Updated: {updated} Messages: {session['message_count']}")
+            return False
+            
+        elif action == "delete":
+            if len(command_parts) < 3:
+                print_error("Please specify session name: /session delete <name>")
+                return False
+            session_name = command_parts[2]
+            if log_manager.delete_session(session_name):
+                print_info(f"Deleted session: {session_name}")
+            else:
+                print_error(f"Session not found: {session_name}")
+            return False
+            
+        elif action == "export":
+            if len(command_parts) < 3:
+                print_error("Please specify session name: /session export <name>")
+                return False
+            session_name = command_parts[2]
+            output_file = log_manager.export_session(session_name, "txt")
+            print_info(f"Exported session to: {output_file}")
+            return False
+            
+        else:
+            print_error(f"Unknown session command: {action}")
+            return False
+            
+    except Exception as e:
+        print_error(f"Session command failed: {e}")
+        return False
+
 # =========================
 # Setup MCP Manager
 # =========================
@@ -235,19 +442,12 @@ async def setup_mcp():
     manager = MCPManager()
     # Updated paths - filesystem server should be in same directory
     await manager.add_server("local", "../filesystem/mcp_server.py")
-
-    await manager.add_server("git", "../Repository/servers/src/git/mcp_server.py")
-    
-    # await manager.add_server("game", "../filesystem/mcp_server.py")
-
+    await manager.add_server("tounge", "../filesystem/tounge.py")
+    await manager.add_server("serving", "../filesystem/git_server.py")
     await manager.add_server("game", "../Repository/MCP_VIDEOGAMES_REC_INFO/server/mcp_server.py")
-
     await manager.add_server("jpgame", "../Repository/MCP_VideogameStats_Server/games/server.py")
-
     # Optional: comment out the remote server if you don't have access
     await manager.add_server("remote", "https://flightbookingU.fastmcp.app/mcp")
-
-
     return manager
 
 # =========================
@@ -256,19 +456,31 @@ async def setup_mcp():
 async def main():
     try:
         manager = await setup_mcp()
+        log_manager = ChatLogManager()
+        
+        # Create initial session
+        initial_session = log_manager.create_new_session()
         
         # DEBUG: Print tool schemas to see what parameters are expected
         manager.debug_tool_schemas()  # Add this line for debugging
         
         tools = manager.get_tools_for_claude()
         
-        print_heading("Chat CLI with Claude + MCPManager")
+        print_heading("Chat CLI with Claude + MCP + JSON Logs")
         print_info(f"Loaded {len(tools)} tools from MCP servers")
-        print_info("Type 'exit' to quit, 'debug' to see tool schemas again.\n")
+        print_info(f"Active session: {initial_session}")
+        print_info("Commands: 'exit', 'debug', '/session new|load|list|delete|export'\n")
 
         history = []
 
         while True:
+            # Show session info
+            try:
+                current_session = log_manager.load_current_session()
+                print_session_info(current_session['session_name'], current_session['message_count'])
+            except:
+                pass
+                
             user_input = input(Fore.WHITE + "You: ")
             if not user_input or user_input.lower() == "exit":
                 print_info("Session ended")
@@ -276,7 +488,22 @@ async def main():
             elif user_input.lower() == "debug":
                 manager.debug_tool_schemas()
                 continue
+            elif user_input.startswith("/session"):
+                result = handle_session_commands(user_input.split(), log_manager)
+                if isinstance(result, list):  # Loading session returned history
+                    history = result
+                    # Convert from log format to Claude format
+                    claude_history = []
+                    for msg in history:
+                        claude_history.append({
+                            "role": msg["role"], 
+                            "content": msg["content"]
+                        })
+                    history = claude_history
+                continue
 
+            # Log user message
+            log_manager.append_message("user", user_input)
             history.append({"role": "user", "content": user_input})
 
             try:
@@ -344,9 +571,11 @@ async def main():
                 if handled:
                     # Add assistant message with tool calls
                     history.append({"role": "assistant", "content": assistant_content})
+                    log_manager.append_message("assistant", assistant_content, {"has_tool_calls": True})
                     
                     # Add tool results as user message
                     history.append({"role": "user", "content": tool_results})
+                    log_manager.append_message("user", tool_results, {"tool_results": True})
 
                     # Get Claude's final response
                     followup = client.messages.create(
@@ -365,14 +594,17 @@ async def main():
                     
                     print(Fore.BLUE + f"Claude: {text_response}\n")
                     history.append({"role": "assistant", "content": text_response})
+                    log_manager.append_message("assistant", text_response)
 
                 if not handled:
                     text_reply = "".join([p.text for p in resp.content if p.type == "text"])
                     print(Fore.BLUE + f"Claude: {text_reply}\n")
                     history.append({"role": "assistant", "content": text_reply})
+                    log_manager.append_message("assistant", text_reply)
 
             except Exception as e:
                 print_error(f"Error with Claude: {e}")
+                log_manager.append_message("system", f"Error: {str(e)}", {"error": True})
                 # Continue the loop instead of crashing
                 continue
                 

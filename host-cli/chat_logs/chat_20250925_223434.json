@@ -1,0 +1,18 @@
+{
+  "session_name": "chat_20250925_223434",
+  "created_at": "2025-09-25T22:34:34.898304",
+  "last_updated": "2025-09-25T22:35:09.156996",
+  "message_count": 2,
+  "history": [
+    {
+      "role": "user",
+      "content": "hello ",
+      "timestamp": "2025-09-25T22:35:01.717109"
+    },
+    {
+      "role": "assistant",
+      "content": "Hello! 👋 Nice to meet you! \n\nI'm here to help you with a variety of tasks. I have access to tools that can help you with:\n\n- **File operations** (reading, writing, managing local files and directories)\n- **Git repository management** (status, commits, branches, etc.)\n- **Game information** (searching games, getting details, trending games, etc.)\n- **Database operations** (MongoDB connections, flight data analysis)\n- **Fun stuff** (like getting random tongue twisters!)\n\nWhat would you like to do today? Just let me know what you need help with!",
+      "timestamp": "2025-09-25T22:35:09.156978"
+    }
+  ]
+}

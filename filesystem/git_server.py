@@ -1,214 +1,436 @@
+#!/usr/bin/env python3
+"""
+Git MCP Server - A Model Context Protocol server for Git operations
+Improved version with better error handling and timeout support
+"""
 
-import os
-import sys
+import asyncio
 import json
 import subprocess
+import sys
+import os
 from pathlib import Path
-from typing import Dict, Any, List
-from fastmcp import FastMCP
+from typing import Any, Dict, List, Optional, Sequence
+
+# MCP SDK imports
+try:
+    from mcp import types
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+except ImportError:
+    print("Error: mcp package not found. Install with: pip install mcp")
+    sys.exit(1)
 
 # Initialize the MCP server
-mcp = FastMCP("Git")
+app = Server("git-server")
 
+class GitError(Exception):
+    """Custom exception for Git operations"""
+    pass
 
-@mcp.tool()
-def git_init(path: str = ".") -> Dict[str, Any]:
-    """Initialize a new git repository"""
+def run_git_command(args: List[str], cwd: Optional[str] = None, timeout: int = 30) -> str:
+    """Run a git command and return the output with timeout and better error handling"""
     try:
-        repo_path = Path(path)
-        if not repo_path.exists():
-            return {"error": f"Directory not found: {path}"}
-
-        result = subprocess.run(
-            ["git", "init"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "message": f"Initialized git repository in {path}",
-                "output": result.stdout.strip()
-            }
-        else:
-            return {"error": f"Git init failed: {result.stderr}"}
-    except Exception as e:
-        return {"error": f"Failed to initialize git repository: {str(e)}"}
-
-@mcp.tool()
-def git_status(repo_path: str = ".") -> Dict[str, Any]:
-    """Get git status"""
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
+        # Ensure we have a valid working directory
+        if cwd is None:
+            cwd = os.getcwd()
         
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "status": result.stdout,
-                "repo_path": str(Path(repo_path).absolute())
-            }
-        else:
-            return {"error": f"Git status failed: {result.stderr}"}
-    except Exception as e:
-        return {"error": f"Failed to get git status: {str(e)}"}
-
-@mcp.tool()
-def git_add(file_path: str = ".", repo_path: str = ".") -> Dict[str, Any]:
-    """Add files to git staging area"""
-    try:
-        result = subprocess.run(
-            ["git", "add", file_path],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
+        # Convert to absolute path and validate
+        cwd = os.path.abspath(cwd)
+        if not os.path.exists(cwd):
+            raise GitError(f"Directory does not exist: {cwd}")
         
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "message": f"Added {file_path} to staging area"
-            }
-        else:
-            return {"error": f"Git add failed: {result.stderr}"}
-    except Exception as e:
-        return {"error": f"Failed to add files to git: {str(e)}"}
-
-@mcp.tool()
-def git_commit(message: str = "Automated commit", repo_path: str = ".") -> Dict[str, Any]:
-    """Commit staged changes"""
-    try:
-        result = subprocess.run(
-            ["git", "commit", "-m", message],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
+        # Set up environment to avoid interactive prompts
+        env = os.environ.copy()
+        env.update({
+            'GIT_TERMINAL_PROMPT': '0',  # Disable terminal prompts
+            'GIT_ASKPASS': 'echo',       # Provide dummy askpass to avoid hanging
+            'SSH_ASKPASS': 'echo',       # Avoid SSH prompts
+            'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes -o StrictHostKeyChecking=no'
+        })
         
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "message": f"Committed changes with message: {message}",
-                "output": result.stdout.strip()
-            }
-        else:
-            return {"error": f"Git commit failed: {result.stderr}"}
-    except Exception as e:
-        return {"error": f"Failed to commit changes: {str(e)}"}
-
-@mcp.tool()
-def git_log(limit: int = 10, repo_path: str = ".") -> Dict[str, Any]:
-    """Get the git commit history"""
-    try:
         result = subprocess.run(
-            ["git", "log", f"--max-count={limit}", "--oneline"],
-            cwd=repo_path,
+            ["git"] + args,
             capture_output=True,
-            text=True
+            text=True,
+            cwd=cwd,
+            check=True,
+            timeout=timeout,
+            env=env
         )
+        return result.stdout.strip()
         
-        if result.returncode == 0:
-            commits = []
-            for line in result.stdout.strip().split('\n'):
-                if line:
-                    parts = line.split(' ', 1)
-                    commits.append({
-                        "hash": parts[0],
-                        "message": parts[1] if len(parts) > 1 else ""
-                    })
+    except subprocess.TimeoutExpired:
+        raise GitError(f"Git command timed out after {timeout} seconds: git {' '.join(args)}")
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.strip() if e.stderr else "Unknown error"
+        raise GitError(f"Git command failed: {error_msg}")
+    except FileNotFoundError:
+        raise GitError("Git is not installed or not in PATH")
+    except Exception as e:
+        raise GitError(f"Unexpected error: {str(e)}")
+
+def validate_git_repo(path: str) -> bool:
+    """Check if the given path is a valid Git repository"""
+    try:
+        run_git_command(["rev-parse", "--git-dir"], cwd=path, timeout=5)
+        return True
+    except GitError:
+        return False
+
+@app.list_tools()
+async def list_tools() -> List[types.Tool]:
+    """List available Git tools"""
+    return [
+        types.Tool(
+            name="git_status",
+            description="Get the status of the Git repository",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional, defaults to current directory)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="git_log",
+            description="Get the Git commit history",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Maximum number of commits to show (default: 10)"
+                    },
+                    "oneline": {
+                        "type": "boolean",
+                        "description": "Show one line per commit (default: false)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="git_diff",
+            description="Show changes between commits, commit and working tree, etc",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "staged": {
+                        "type": "boolean",
+                        "description": "Show staged changes (default: false)"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Show diff for specific file (optional)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="git_add",
+            description="Add files to the staging area",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to add (use '.' for all files)"
+                    }
+                },
+                "required": ["files"]
+            }
+        ),
+        types.Tool(
+            name="git_commit",
+            description="Create a new commit",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Commit message"
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Commit all modified files (default: false)"
+                    }
+                },
+                "required": ["message"]
+            }
+        ),
+        types.Tool(
+            name="git_branch",
+            description="List, create, or delete branches",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "list": {
+                        "type": "boolean",
+                        "description": "List all branches (default: true)"
+                    },
+                    "create": {
+                        "type": "string",
+                        "description": "Create a new branch with this name"
+                    },
+                    "delete": {
+                        "type": "string",
+                        "description": "Delete branch with this name"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="git_checkout",
+            description="Switch branches or restore working tree files",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Branch name to checkout"
+                    },
+                    "create": {
+                        "type": "boolean",
+                        "description": "Create new branch if it doesn't exist (default: false)"
+                    }
+                },
+                "required": ["branch"]
+            }
+        ),
+        types.Tool(
+            name="git_push",
+            description="Push commits to remote repository",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "remote": {
+                        "type": "string",
+                        "description": "Remote name (default: origin)"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Branch name (optional, defaults to current branch)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="git_pull",
+            description="Fetch and merge changes from remote repository",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Git repository (optional)"
+                    },
+                    "remote": {
+                        "type": "string",
+                        "description": "Remote name (default: origin)"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Branch name (optional, defaults to current branch)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="git_init",
+            description="Initialize a new Git repository",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path where to initialize the repository (optional)"
+                    }
+                }
+            }
+        )
+    ]
+
+@app.call_tool()
+async def call_tool(name: str, arguments: Dict[str, Any]) -> Sequence[types.TextContent]:
+    """Handle tool calls"""
+    try:
+        path = arguments.get("path", ".")
+        
+        # For init, we don't need to validate the repo exists yet
+        if name != "git_init" and not validate_git_repo(path):
+            return [types.TextContent(
+                type="text", 
+                text=f"Error: {path} is not a valid Git repository. Use git_init to create one."
+            )]
+        
+        if name == "git_status":
+            # Try porcelain format first, fall back to regular status
+            try:
+                output = run_git_command(["status", "--porcelain", "-b"], cwd=path)
+                if not output:
+                    output = "Working tree clean"
+                else:
+                    # Add a header for better readability
+                    output = "Repository Status:\n" + output
+            except GitError:
+                output = run_git_command(["status"], cwd=path)
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_log":
+            max_count = arguments.get("max_count", 10)
+            oneline = arguments.get("oneline", False)
             
-            return {
-                "success": True,
-                "commits": commits,
-                "repo_path": str(Path(repo_path).absolute())
-            }
-        else:
-            return {"error": f"Git log failed: {result.stderr}"}
-    except Exception as e:
-        return {"error": f"Failed to get git log: {str(e)}"}
-
-@mcp.tool()
-def git_branch(repo_path: str = ".") -> Dict[str, Any]:
-    """List git branches"""
-    try:
-        result = subprocess.run(
-            ["git", "branch"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            branches = []
-            current_branch = None
+            args = ["log", f"--max-count={max_count}"]
+            if oneline:
+                args.append("--oneline")
+            else:
+                args.extend(["--pretty=format:%h - %an, %ar : %s"])
             
-            for line in result.stdout.strip().split('\n'):
-                if line:
-                    if line.startswith('* '):
-                        current_branch = line[2:].strip()
-                        branches.append(current_branch)
-                    else:
-                        branches.append(line.strip())
+            output = run_git_command(args, cwd=path)
+            if not output:
+                output = "No commits found"
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_diff":
+            staged = arguments.get("staged", False)
+            file = arguments.get("file")
             
-            return {
-                "success": True,
-                "branches": branches,
-                "current_branch": current_branch,
-                "repo_path": str(Path(repo_path).absolute())
-            }
+            args = ["diff"]
+            if staged:
+                args.append("--staged")
+            if file:
+                args.append(file)
+            
+            output = run_git_command(args, cwd=path)
+            if not output:
+                output = "No changes to show"
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_add":
+            files = arguments["files"]
+            args = ["add"] + files
+            run_git_command(args, cwd=path)
+            return [types.TextContent(type="text", text=f"Successfully added files: {', '.join(files)}")]
+        
+        elif name == "git_commit":
+            message = arguments["message"]
+            all_files = arguments.get("all", False)
+            
+            args = ["commit", "-m", message]
+            if all_files:
+                args.append("-a")
+            
+            output = run_git_command(args, cwd=path)
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_branch":
+            if arguments.get("create"):
+                branch_name = arguments["create"]
+                run_git_command(["branch", branch_name], cwd=path)
+                return [types.TextContent(type="text", text=f"Successfully created branch: {branch_name}")]
+            
+            elif arguments.get("delete"):
+                branch_name = arguments["delete"]
+                run_git_command(["branch", "-d", branch_name], cwd=path)
+                return [types.TextContent(type="text", text=f"Successfully deleted branch: {branch_name}")]
+            
+            else:
+                output = run_git_command(["branch", "-a"], cwd=path)
+                if not output:
+                    output = "No branches found"
+                return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_checkout":
+            branch = arguments["branch"]
+            create = arguments.get("create", False)
+            
+            args = ["checkout"]
+            if create:
+                args.append("-b")
+            args.append(branch)
+            
+            output = run_git_command(args, cwd=path)
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_push":
+            remote = arguments.get("remote", "origin")
+            branch = arguments.get("branch")
+            
+            args = ["push", remote]
+            if branch:
+                args.append(branch)
+            
+            output = run_git_command(args, cwd=path)
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_pull":
+            remote = arguments.get("remote", "origin")
+            branch = arguments.get("branch")
+            
+            args = ["pull", remote]
+            if branch:
+                args.append(branch)
+            
+            output = run_git_command(args, cwd=path)
+            return [types.TextContent(type="text", text=output)]
+        
+        elif name == "git_init":
+            output = run_git_command(["init"], cwd=path)
+            return [types.TextContent(type="text", text=f"Initialized Git repository at {os.path.abspath(path)}")]
+        
         else:
-            return {"error": f"Git branch failed: {result.stderr}"}
+            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+    
+    except GitError as e:
+        return [types.TextContent(type="text", text=f"Git error: {str(e)}")]
     except Exception as e:
-        return {"error": f"Failed to list git branches: {str(e)}"}
+        return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
-@mcp.tool()
-def git_diff(file_path: str = "", repo_path: str = ".") -> Dict[str, Any]:
-    """Show git diff for changes"""
+async def main():
+    """Main entry point"""
     try:
-        cmd = ["git", "diff"]
-        if file_path:
-            cmd.append(file_path)
-        
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "diff": result.stdout,
-                "file_path": file_path,
-                "repo_path": str(Path(repo_path).absolute())
-            }
-        else:
-            return {"error": f"Git diff failed: {result.stderr}"}
+        # Run the server using stdio transport
+        async with stdio_server() as streams:
+            await app.run(
+                streams[0], streams[1], app.create_initialization_options()
+            )
+    except KeyboardInterrupt:
+        print("\nShutting down Git MCP server...")
     except Exception as e:
-        return {"error": f"Failed to get git diff: {str(e)}"}
+        print(f"Error running server: {e}", file=sys.stderr)
+        sys.exit(1)
 
-@mcp.tool()
-def manual_git_commands(repo_path: str = ".") -> Dict[str, Any]:
-    """Provide manual git commands to run in terminal"""
-    return {
-        "success": True,
-        "message": "Here are some common git commands you can run manually:",
-        "commands": [
-            "git init - Initialize a new git repository",
-            "git status - Check the status of your repository",
-            "git add <file> - Add files to staging area",
-            "git add . - Add all files to staging area",
-            "git commit -m 'message' - Commit staged changes",
-            "git log - View commit history",
-            "git branch - List branches",
-            "git diff - Show changes"
-        ],
-        "repo_path": str(Path(repo_path).absolute())
-    }
+if __name__ == "__main__":
+    asyncio.run(main())
