@@ -1,0 +1,12 @@
+[
+  {
+    "role": "user",
+    "content": "Getting trending games",
+    "timestamp": "2025-09-25T11:03:53.363710"
+  },
+  {
+    "role": "assistant",
+    "content": "Retrieved 10 trending games",
+    "timestamp": "2025-09-25T11:03:54.810401"
+  }
+]
